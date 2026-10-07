@@ -93,7 +93,8 @@ async function readNotebook(file, onProgress) {
 // Recording length and photo size, read from the media itself. Gives up quietly after 3 s.
 function addMeta(f) {
   return new Promise((resolve) => {
-    const done = (meta) => { f.meta = meta || ""; resolve(); };
+    let settled = false;
+    const done = (meta) => { if (settled) return; settled = true; f.meta = meta || ""; resolve(); };
     setTimeout(done, 3000);
     if (f.kind.type === "audio") {
       const a = new Audio();
