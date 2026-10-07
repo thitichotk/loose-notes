@@ -1,10 +1,14 @@
-# Loose-Notes
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-inverse.svg">
+    <img alt="Loose-Notes" src="assets/logo.svg" height="48">
+  </picture>
+</h1>
 
-**Live: [loosenotes.thitichotk.com](https://loosenotes.thitichotk.com)**
+**Live: [loosenotes.thitichotk.com](https://loosenotes.thitichotk.com)** (runs in your browser, nothing is uploaded)
 
 Loose-Notes pulls the audio recordings, PDFs and images out of `.goodnotes` files. Drop in one notebook or several and
-you get back what's inside, grouped by notebook, ready to download one by one or as a zip. It all runs in your browser:
-nothing is uploaded.
+you get back what's inside, grouped by notebook, ready to download one by one or as a zip.
 
 ![Loose-Notes with two notebooks opened](assets/screenshot.jpg)
 
@@ -15,22 +19,9 @@ nothing is uploaded.
 3. Click a file's name to preview it (images and recordings open in place; PDFs open in a new tab), use the download
    button on the row, or press **Download all** for one zip.
 
-## What comes out
-
-| In the notebook | Saved as | How it's recognised |
-|---|---|---|
-| Recordings | `Audio 01.m4a` | `ftyp` box at byte 4 (GoodNotes records M4A) |
-| Imported PDFs | `PDF 01.pdf` | `%PDF` |
-| Photos and pasted images | `Image 01.jpg` / `.png` / `.heic` / `.gif` / `.webp` | file signature |
-
-GoodNotes stores attachments without names or extensions, so Loose-Notes reads each file's first bytes to work out
-what it is. Files are numbered per type, oldest first by the date stored with each attachment. Attachments under 10 KB are
-skipped, because those are GoodNotes' own page templates and icons. Downloads keep the notebook's name in front
-(`Biology Lecture 4 - Audio 01.m4a`), Thai names included.
-
 ## Run it locally
 
-It's a static page; any web server will do (ES modules don't load from `file://`).
+A static site with no build step; any web server works (ES modules don't load from `file://`).
 
 ```bash
 git clone https://github.com/thitichotk/loose-notes.git
@@ -39,7 +30,22 @@ python3 -m http.server 8000      # then open http://localhost:8000
 node check.mjs                   # checks the file-signature table
 ```
 
-| File | Role |
+Cloudflare Pages deploys `main` as it is, and each pull request gets a preview link.
+
+## How it works
+
+| In the notebook | Saved as | How it's recognised |
+|---|---|---|
+| Recordings | `Audio 01.m4a` | `ftyp` box at byte 4 (GoodNotes records M4A) |
+| Imported PDFs | `PDF 01.pdf` | `%PDF` |
+| Photos and pasted images | `Image 01.jpg` / `.png` / `.heic` / `.gif` / `.webp` | file signature |
+
+GoodNotes stores attachments without names or extensions, so Loose-Notes reads each file's first bytes to work out
+what it is. Files are numbered per type, oldest first by the date stored with each attachment. Attachments under
+10 KB are skipped, because those are GoodNotes' own page templates and icons. Downloads keep the notebook's name in
+front (`Biology Lecture 4 - Audio 01.m4a`), Thai names included.
+
+| Path | Role |
 |---|---|
 | `index.html` | The page, plus the inlined icon set |
 | `script.js` | Reading notebooks with JSZip, rendering, preview, downloads and zips |
@@ -47,7 +53,7 @@ node check.mjs                   # checks the file-signature table
 | `styles.css` | The Loose-Notes design system: graphite on paper, ruled-paper drop zone, green highlighter |
 | `check.mjs` | One `node` check for `detect.js` |
 
-Cloudflare Pages deploys the `main` branch as it is (there's no build step), and each pull request gets a preview link.
+Built with plain HTML, CSS and ES modules. JSZip 3.10.1 loads from cdnjs with subresource integrity.
 
 ## Limits
 
@@ -55,7 +61,7 @@ Cloudflare Pages deploys the `main` branch as it is (there's no build step), and
   browser. A computer handles them better.
 - HEIC photos download fine but only preview in Safari.
 
-## Credits and license
+## Credits and licence
 
 Loose-Notes is a fork of [alinuxpengui/goodnotes-extractor](https://github.com/alinuxpengui/goodnotes-extractor),
 redesigned and largely rewritten by Thitichot K. Zip handling by [JSZip](https://github.com/Stuk/jszip), icons from
