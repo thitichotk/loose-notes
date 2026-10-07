@@ -1,7 +1,7 @@
 <h1>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo-inverse.svg">
-    <img alt="Loose-Notes" src="assets/logo.svg" height="48">
+    <img alt="Loose-Notes" src="assets/logo.svg" height="64">
   </picture>
 </h1>
 
