@@ -47,7 +47,7 @@ node check.mjs                   # checks the file-signature table
 | `styles.css` | The Loose-Notes design system: graphite on paper, ruled-paper drop zone, green highlighter |
 | `check.mjs` | One `node` check for `detect.js` |
 
-GitHub Pages serves the `main` branch as it is; there's no build step.
+Cloudflare Pages deploys the `main` branch as it is (there's no build step), and each pull request gets a preview link.
 
 ## Limits
 
