@@ -1,674 +1,261 @@
-// ============================================
-// CONSTANTS
-// ============================================
-// This extractor ONLY supports 4 file types:
-// 1. MP3 - Audio files (including M4A converted to MP3)
-// 2. PDF - Document files
-// 3. PNG - Image files
-// 4. JPG/JPEG - Image files
-// All other formats are automatically filtered out.
+// Loose-Notes: reads .goodnotes files (zip archives) in the browser with JSZip and offers
+// the audio, PDFs and images inside. Nothing leaves the page.
+import { kindOf } from "./detect.js";
 
-const CONFIG = {
-    FILE_EXTENSIONS: {
-        AUDIO: ['mp3', 'm4a'],
-        IMAGE: ['png', 'jpg', 'jpeg'],
-        DOCUMENT: ['pdf'],
-        ALLOWED: ['mp3', 'pdf', 'png', 'jpg', 'jpeg'] // Only these file types will be extracted
-    },
-    MIME_TYPES: {
-        'mp3': 'audio/mpeg',
-        'mp4': 'audio/mp4',
-        'm4a': 'audio/mp4',
-        'pdf': 'application/pdf',
-        'png': 'image/png',
-        'jpg': 'image/jpeg',
-        'jpeg': 'image/jpeg',
-        'bin': 'audio/mpeg', // Default to audio for unknown files
-        'default': 'application/octet-stream'
-    },
-    FILE_SIGNATURES: {
-        'mp3': [0x49, 0x44, 0x33],        // ID3 tag (MP3)
-        'm4a': [0x66, 0x74, 0x79, 0x70],  // ftyp (M4A/MP4)
-        'pdf': [0x25, 0x50, 0x44, 0x46],  // %PDF
-        'png': [0x89, 0x50, 0x4E, 0x47],  // PNG
-        'jpg': [0xFF, 0xD8, 0xFF]         // JPEG
-    },
-    PATHS: {
-        ATTACHMENTS: 'attachments/'
-    },
-    SIZES: {
-        SIGNATURE_HEADER_SIZE: 12,
-        FILENAME_TRUNCATE_LENGTH: 20
-    },
-    TIMING: {
-        DOWNLOAD_DELAY_MS: 300
-    },
-    UNITS: {
-        BYTES_TO_MB: 1024 * 1024,
-        DECIMAL_PLACES: 2
-    }
-};
+const MIN_SIZE = 10 * 1024; // smaller attachments are GoodNotes' own page templates and icons
+const LABEL = { audio: "Audio", pdf: "PDF", image: "Image" };
+const ICON = { audio: "audio-lines", pdf: "file-text", image: "image" };
+const NOT_GOODNOTES = "This isn't a GoodNotes file. Export the notebook from GoodNotes as .goodnotes and try again.";
 
-const DOM_IDS = {
-    FILE_INPUT: 'goodnotesFile',
-    RESULTS: 'results'
-};
+const $ = (id) => document.getElementById(id);
+const drop = $("drop"), input = $("file"), results = $("results"), list = $("books");
+const preview = $("preview");
 
-// ============================================
-// UTILITY FUNCTIONS
-// ============================================
+// Each notebook: { id, name, key, state: "reading" | "done" | "failed", done, total, files, error }
+let books = [];
+let nextId = 0;
 
-/**
- * Organizes, filters, sorts, and renames extracted files based on specific rules.
- * @param {Array<Object>} attachments Array of JSZip entries and associated metadata.
- * @returns {Promise<Array<Object>>} Processed and flattened array of files ready for UI rendering and download.
- */
-async function organizeAndRenameFiles(attachments) {
-    const validFiles = [];
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const icon = (id) => `<svg class="icon" aria-hidden="true"><use href="#i-${id}"/></svg>`;
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const fmtSize = (n) => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1)} MB`);
+const fmtTime = (s) => (s >= 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`);
+const safeName = (s) => s.replace(/[\/\\:*?"<>|\x00-\x1f]/g, "_").trim() || "notebook"; // keeps Thai
+const stem = (name) => name.replace(/\.goodnotes$/i, "");
 
-    // 1. Initial Filtering & Processing
-    for (const item of attachments) {
-        try {
-            const { zipEntry, sourceFile, fileIndex } = item;
-            
-            // Filter out system files or tiny structural icons (under 10KB)
-            const uncompressedSize = zipEntry._data.uncompressedSize || 0;
-            if (uncompressedSize < 10240) {
-                continue; 
-            }
-
-            const blob = await zipEntry.async('blob');
-            let extension = await guessExtension(blob);
-            
-            // Normalize extensions based on existing constraints
-            if (extension === 'bin') {
-                extension = 'mp3';
-            }
-            if (['m4a', 'mp4'].includes(extension)) {
-                extension = 'mp3';
-            }
-
-            // Only allow designated extensions
-            if (!CONFIG.FILE_EXTENSIONS.ALLOWED.includes(extension)) {
-                continue;
-            }
-
-            // Categorize (Grouping Level 2)
-            let category = 'Unknown';
-            if (CONFIG.FILE_EXTENSIONS.AUDIO.includes(extension)) {
-                category = 'Audio';
-            } else if (CONFIG.FILE_EXTENSIONS.IMAGE.includes(extension)) {
-                category = 'Images';
-            } else if (CONFIG.FILE_EXTENSIONS.DOCUMENT.includes(extension)) {
-                category = 'PDFs';
-            }
-
-            // Parent directory (Grouping Level 1 - Based on Source File)
-            const parentDir = sourceFile.replace(/\.[^/.]+$/, ""); // Strip extension (e.g., .goodnotes)
-
-            // Include timestamp for chronological sorting
-            validFiles.push({
-                zipEntry,
-                blob,
-                extension,
-                category,
-                parentDir,
-                fileIndex,
-                sourceFile,
-                timestamp: zipEntry.date ? zipEntry.date.getTime() : Date.now()
-            });
-        } catch (error) {
-            console.warn(`Skipping corrupted or unreadable file in ${item.sourceFile}:`, error);
-        }
-    }
-
-    // 2. Group Valid Files
-    const groupedStructure = {};
-    for (const fileObj of validFiles) {
-        const { parentDir, category } = fileObj;
-        if (!groupedStructure[parentDir]) {
-            groupedStructure[parentDir] = { 'Audio': [], 'Images': [], 'PDFs': [] };
-        }
-        groupedStructure[parentDir][category].push(fileObj);
-    }
-
-    // 3. Sort chronologically and rename sequentially
-    const finalStructuredFiles = [];
-    let globalIndex = 0;
-
-    for (const parentDir in groupedStructure) {
-        for (const category in groupedStructure[parentDir]) {
-            const filesInCategory = groupedStructure[parentDir][category];
-            if (filesInCategory.length === 0) continue;
-
-            // Sort ascending: oldest -> newest
-            filesInCategory.sort((a, b) => a.timestamp - b.timestamp);
-
-            filesInCategory.forEach((fileObj, index) => {
-                // String padding constraint (e.g., Audio_01.mp3)
-                const seq = String(index + 1).padStart(2, '0');
-                
-                let prefix = 'File';
-                if (category === 'Audio') prefix = 'Audio';
-                else if (category === 'Images') prefix = 'Image';
-                else if (category === 'PDFs') prefix = 'Document';
-
-                // Combine for Group Level 2 specific renaming
-                const newFileName = `${prefix}_${seq}.${fileObj.extension}`;
-                
-                finalStructuredFiles.push({
-                    ...fileObj,
-                    newFileName,
-                    globalIndex: globalIndex++
-                });
-            });
-        }
-    }
-
-    return finalStructuredFiles;
+function summary(files) {
+  const count = (t) => files.filter((f) => f.kind.type === t).length;
+  const parts = [];
+  if (count("audio")) parts.push(`${count("audio")} audio`);
+  if (count("pdf")) parts.push(plural(count("pdf"), "PDF"));
+  if (count("image")) parts.push(plural(count("image"), "image"));
+  return parts.join(" · ");
 }
 
-function resetFileInput() {
-    // Clean up blob URLs to prevent memory leaks
-    if (window.fileData) {
-        Object.values(window.fileData).forEach(data => {
-            if (data.url) {
-                URL.revokeObjectURL(data.url);
-            }
-        });
-        window.fileData = {};
-    }
-    
-    document.getElementById(DOM_IDS.FILE_INPUT).value = '';
-    document.getElementById(DOM_IDS.RESULTS).innerHTML = '';
-}
+// ---------- Reading ----------
 
-// ============================================
-// FILE PROCESSING
-// ============================================
-
-document.getElementById(DOM_IDS.FILE_INPUT).addEventListener('change', async (e) => {
+async function addFiles(fileList) {
+  for (const file of fileList) {
+    const key = `${file.name}:${file.size}:${file.lastModified}`;
+    if (books.some((b) => b.key === key)) continue; // same file dropped twice
+    const book = { id: nextId++, name: file.name, key, state: "reading", done: 0, total: 0, files: [] };
+    books.push(book);
+    render();
     try {
-        const files = Array.from(e.target.files);
-        if (!files || files.length === 0) return;
-
-        const resultsDiv = document.getElementById(DOM_IDS.RESULTS);
-        resultsDiv.innerHTML = createLoadingHTML(files.length);
-
-        let allAttachments = [];
-        let fileIndex = 0;
-
-        // Process each GoodNotes file
-        for (const file of files) {
-            const zip = await JSZip.loadAsync(file);
-
-            zip.forEach((relativePath, zipEntry) => {
-                if (zipEntry.name.toLowerCase().includes(CONFIG.PATHS.ATTACHMENTS) && !zipEntry.dir) {
-                    allAttachments.push({
-                        zipEntry: zipEntry,
-                        sourceFile: file.name,
-                        fileIndex: fileIndex
-                    });
-                }
-            });
-
-            fileIndex++;
-        }
-
-        if (allAttachments.length === 0) {
-            resultsDiv.innerHTML = createEmptyStateHTML(files.length);
-            return;
-        }
-
-        // Apply advanced filtering, sorting, and renaming logic
-        const organizedFiles = await organizeAndRenameFiles(allAttachments);
-
-        if (organizedFiles.length === 0) {
-            resultsDiv.innerHTML = createEmptyStateHTML(files.length);
-            return;
-        }
-
-        const filesHTML = await Promise.all(
-            organizedFiles.map(async (item) => {
-                const { blob, extension, newFileName, parentDir, category, globalIndex, sourceFile } = item;
-
-                // Get MIME type for the extension
-                const mimeType = getMimeType(extension);
-                const typedBlob = new Blob([blob], { type: mimeType });
-                const fileUrl = URL.createObjectURL(typedBlob);
-                const fileSizeMB = (blob.size / CONFIG.UNITS.BYTES_TO_MB).toFixed(CONFIG.UNITS.DECIMAL_PLACES);
-                
-                const isAudio = category === 'Audio';
-                const isPDF = category === 'PDFs';
-                const isImage = category === 'Images';
-
-                // Store file data for later use matching the new structure
-                window.fileData = window.fileData || {};
-                window.fileData[`file_${globalIndex}`] = {
-                    url: fileUrl,
-                    extension: extension,
-                    blob: typedBlob,
-                    sourceFileName: parentDir,
-                    newFileName: newFileName,
-                    index: globalIndex
-                };
-
-                let previewHTML = '';
-                
-                if (isAudio) {
-                    previewHTML = createAudioPreviewHTML(fileUrl);
-                } else if (isPDF) {
-                    previewHTML = createPDFPreviewHTML(fileUrl);
-                } else if (isImage) {
-                    previewHTML = createImagePreviewHTML(fileUrl, globalIndex);
-                } else {
-                    previewHTML = createDefaultPreviewHTML();
-                }
-
-                return createFileCardHTML(previewHTML, globalIndex, extension, isAudio, isPDF, isImage, fileSizeMB, newFileName, files.length);
-            })
-        );
-
-        // Filter out any potential nulls
-        const filteredFilesHTML = filesHTML.filter(html => html !== null);
-        
-        if (filteredFilesHTML.length === 0) {
-            resultsDiv.innerHTML = createEmptyStateHTML(files.length);
-            return;
-        }
-
-        resultsDiv.innerHTML = createResultsHTML(filteredFilesHTML, filteredFilesHTML.length, files.length);
-
-        // Ensure audio elements are properly initialized
-        const audioElements = resultsDiv.querySelectorAll('audio');
-        audioElements.forEach(audio => {
-            audio.load(); // Force load the audio
-        });
-
+      if (!/\.goodnotes$/i.test(file.name)) throw new Error(NOT_GOODNOTES);
+      book.files = await readNotebook(file, (done, total) => {
+        Object.assign(book, { done, total });
+        updateProgress(book);
+      });
+      book.state = "done";
     } catch (error) {
-        console.error('Error:', error);
-        const resultsDiv = document.getElementById(DOM_IDS.RESULTS);
-        resultsDiv.innerHTML = createErrorHTML(error.message);
+      book.state = "failed";
+      book.error = error.message === NOT_GOODNOTES ? NOT_GOODNOTES : `${NOT_GOODNOTES} (${error.message})`;
     }
+    render();
+  }
+}
+
+async function readNotebook(file, onProgress) {
+  let zip;
+  try {
+    zip = await JSZip.loadAsync(file);
+  } catch {
+    throw new Error(NOT_GOODNOTES);
+  }
+  const entries = Object.values(zip.files).filter((e) => !e.dir && e.name.toLowerCase().includes("attachments/"));
+  const found = [];
+  for (const [i, entry] of entries.entries()) {
+    try {
+      const raw = await entry.async("blob");
+      if (raw.size >= MIN_SIZE) {
+        const kind = kindOf(new Uint8Array(await raw.slice(0, 16).arrayBuffer()));
+        if (kind) found.push({ kind, blob: new Blob([raw], { type: kind.mime }), date: entry.date });
+      }
+    } catch (error) {
+      console.warn(`Skipped an unreadable attachment in ${file.name}:`, error); // one bad entry shouldn't sink the notebook
+    }
+    onProgress(i + 1, entries.length);
+  }
+
+  // Oldest first, numbered per type: "Audio 01.m4a", "PDF 01.pdf", "Image 03.jpg".
+  found.sort((a, b) => a.date - b.date);
+  const seen = {};
+  const files = found.map((f) => {
+    seen[f.kind.type] = (seen[f.kind.type] || 0) + 1;
+    const name = `${LABEL[f.kind.type]} ${String(seen[f.kind.type]).padStart(2, "0")}.${f.kind.ext}`;
+    return { ...f, name, url: URL.createObjectURL(f.blob), meta: "" };
+  });
+  await Promise.all(files.map(addMeta));
+  return files;
+}
+
+// Recording length and photo size, read from the media itself. Gives up quietly after 3 s.
+function addMeta(f) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (meta) => { if (settled) return; settled = true; f.meta = meta || ""; resolve(); };
+    setTimeout(done, 3000);
+    if (f.kind.type === "audio") {
+      const a = new Audio();
+      a.preload = "metadata";
+      a.onloadedmetadata = () => done(Number.isFinite(a.duration) ? fmtTime(a.duration) : "");
+      a.onerror = () => done();
+      a.src = f.url;
+    } else if (f.kind.type === "image") {
+      const img = new Image();
+      img.onload = () => done(`${img.naturalWidth} × ${img.naturalHeight}`);
+      img.onerror = () => done();
+      img.src = f.url;
+    } else {
+      done();
+    }
+  });
+}
+
+// ---------- Rendering ----------
+
+function render() {
+  results.hidden = books.length === 0;
+  $("reset").hidden = books.length === 0;
+  const ready = books.filter((b) => b.state === "done");
+  const total = ready.reduce((n, b) => n + b.files.length, 0);
+  $("results-title").textContent = plural(books.length, "notebook");
+  const all = $("download-all");
+  all.hidden = total === 0;
+  all.innerHTML = `${icon("download")}Download all · ${plural(total, "file")}`;
+  list.innerHTML = books.map(bookHTML).join("");
+}
+
+function bookHTML(book) {
+  const name = `<h3 title="${esc(book.name)}">${esc(book.name)}</h3>`;
+  if (book.state === "reading") {
+    return `<section class="book" data-book="${book.id}">
+      <header><span class="cover reading">${icon("loader")}</span><div class="grow">${name}<p>Reading the notebook</p></div></header>
+      <div class="reading"><div class="progress"><i></i></div><span class="help num"></span></div></section>`;
+  }
+  if (book.state === "failed") {
+    return `<section class="book" data-book="${book.id}">
+      <header><span class="cover failed">${icon("circle-alert")}</span><div class="grow">${name}<p>Couldn't read this file</p></div></header>
+      <p class="error" role="alert">${esc(book.error)}</p></section>`;
+  }
+  if (book.files.length === 0) {
+    return `<section class="book" data-book="${book.id}">
+      <header><span class="cover">${icon("notebook")}</span><div class="grow">${name}<p>No audio, PDFs or images in this notebook.</p></div></header></section>`;
+  }
+  return `<section class="book" data-book="${book.id}">
+    <header><span class="cover">${icon("notebook")}</span><div class="grow">${name}<p>${summary(book.files)}</p></div>
+      <button class="btn btn-secondary btn-sm" type="button" data-zip="${book.id}">${icon("download")}Download all</button></header>
+    ${book.files.map((f, i) => fileHTML(book, f, i)).join("")}</section>`;
+}
+
+function fileHTML(book, f, i) {
+  const ref = `data-book="${book.id}" data-file="${i}"`;
+  const thumb = f.kind.type === "image" && f.kind.ext !== "heic" ? `<img src="${f.url}" alt="">` : icon(ICON[f.kind.type]);
+  return `<div class="file">
+    <span class="kind">${thumb}</span>
+    <div><button class="name" type="button" data-open ${ref} title="${f.kind.type === "pdf" ? "Open" : "Preview"} ${esc(f.name)}">${esc(f.name)}</button>
+      <div class="sub"><span class="type">${icon(ICON[f.kind.type])}${LABEL[f.kind.type]}</span>${esc(f.meta)}</div></div>
+    <span class="size">${fmtSize(f.blob.size)}</span>
+    <button class="icon-btn" type="button" data-save ${ref} aria-label="Download ${esc(f.name)}">${icon("download")}</button>
+  </div>`;
+}
+
+// Updating only the bar keeps a long read from rebuilding the whole list on every attachment.
+function updateProgress(book) {
+  const el = list.querySelector(`[data-book="${book.id}"]`);
+  if (!el || !book.total) return;
+  const pct = Math.round((book.done / book.total) * 100);
+  el.querySelector(".progress i").style.width = `${pct}%`;
+  el.querySelector(".reading .help").textContent = `${pct}% · ${book.done} of ${book.total} files`;
+}
+
+// ---------- Saving ----------
+
+function save(blob, filename) {
+  const a = document.createElement("a");
+  a.href = blob instanceof Blob ? URL.createObjectURL(blob) : blob;
+  a.download = filename;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  if (blob instanceof Blob) setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+}
+
+const downloadName = (book, f) => `${safeName(stem(book.name))} - ${f.name}`;
+
+// One zip instead of a burst of downloads, which browsers block. Files are stored, not
+// recompressed: audio, PDFs and photos are already compressed.
+async function saveZip(targets, button) {
+  const label = button.innerHTML;
+  button.disabled = true;
+  button.textContent = "Packing…";
+  try {
+    const zip = new JSZip();
+    for (const book of targets) {
+      const folder = targets.length > 1 ? zip.folder(safeName(stem(book.name))) : zip;
+      book.files.forEach((f) => folder.file(f.name, f.blob));
+    }
+    const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
+    save(blob, targets.length > 1 ? "Loose-Notes.zip" : `${safeName(stem(targets[0].name))}.zip`);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = label;
+  }
+}
+
+// ---------- Preview ----------
+
+let previewing = null;
+
+function openPreview(book, f) {
+  if (f.kind.type === "pdf") return window.open(f.url, "_blank", "noopener");
+  previewing = { book, f };
+  $("preview-body").innerHTML =
+    f.kind.type === "image" ? `<img src="${f.url}" alt="${esc(f.name)}">` : `<audio controls autoplay src="${f.url}"></audio>`;
+  $("preview-name").textContent = f.name;
+  $("preview-size").textContent = [fmtSize(f.blob.size), f.meta].filter(Boolean).join(" · ");
+  preview.showModal();
+}
+
+preview.addEventListener("close", () => { $("preview-body").innerHTML = ""; previewing = null; });
+preview.addEventListener("click", (e) => { if (e.target === preview) preview.close(); }); // backdrop
+$("preview-close").addEventListener("click", () => preview.close());
+$("preview-download").addEventListener("click", () => previewing && save(previewing.f.url, downloadName(previewing.book, previewing.f)));
+
+// ---------- Wiring ----------
+
+list.addEventListener("click", (e) => {
+  const target = e.target.closest("[data-save], [data-open], [data-zip]");
+  if (!target) return;
+  if (target.dataset.zip !== undefined) {
+    return saveZip(books.filter((b) => b.id === Number(target.dataset.zip)), target);
+  }
+  const book = books.find((b) => b.id === Number(target.dataset.book));
+  const f = book?.files[Number(target.dataset.file)];
+  if (!f) return;
+  if (target.dataset.save !== undefined) save(f.url, downloadName(book, f));
+  else openPreview(book, f);
 });
 
-// ============================================
-// HTML TEMPLATE FUNCTIONS
-// ============================================
+$("download-all").addEventListener("click", (e) =>
+  saveZip(books.filter((b) => b.state === "done" && b.files.length), e.currentTarget));
 
-function createLoadingHTML(fileCount) {
-    return `
-        <div class="loading">
-            <div class="loading-spinner"></div>
-            <div>Processing ${fileCount} GoodNotes file${fileCount > 1 ? 's' : ''}...</div>
-        </div>
-    `;
-}
+$("reset").addEventListener("click", () => {
+  books.forEach((b) => b.files.forEach((f) => URL.revokeObjectURL(f.url)));
+  books = [];
+  input.value = "";
+  render();
+});
 
-function createEmptyStateHTML(fileCount) {
-    return `
-        <div class="empty-state">
-            <svg class="empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-                <polyline points="9 22 9 12 15 12 15 22"/>
-            </svg>
-            <div>No attachments found in ${fileCount > 1 ? 'these files' : 'this file'}</div>
-        </div>
-    `;
-}
+input.addEventListener("change", () => {
+  addFiles([...input.files]);
+  input.value = ""; // so choosing the same file again still fires
+});
 
-function createErrorHTML(message) {
-    return `
-        <div class="error-message">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"/>
-                <line x1="15" y1="9" x2="9" y2="15"/>
-                <line x1="9" y1="9" x2="15" y2="15"/>
-            </svg>
-            <div>Error: ${message}</div>
-        </div>
-    `;
-}
-
-function createAudioPreviewHTML(fileUrl) {
-    return `
-        <div class="audio-player">
-            <audio controls preload="metadata" controlsList="nodownload">
-                <source src="${fileUrl}" type="audio/mpeg">
-                <source src="${fileUrl}" type="audio/mp4">
-                <source src="${fileUrl}" type="audio/x-m4a">
-                Your browser does not support the audio element.
-            </audio>
-        </div>
-    `;
-}
-
-function createPDFPreviewHTML(fileUrl) {
-    return `
-        <div class="file-preview">
-            <iframe src="${fileUrl}#view=FitH" type="application/pdf" loading="lazy"></iframe>
-        </div>
-    `;
-}
-
-function createImagePreviewHTML(fileUrl, index) {
-    return `
-        <div class="file-preview image-preview">
-            <img src="${fileUrl}" alt="Image preview" loading="lazy" onclick="openImageModal('file_${index}')">
-        </div>
-    `;
-}
-
-function createDefaultPreviewHTML() {
-    return `
-        <div class="file-preview">
-            <div class="preview-placeholder">
-                <svg class="preview-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                </svg>
-                <div>Preview not available</div>
-            </div>
-        </div>
-    `;
-}
-
-function createFileCardHTML(previewHTML, index, extension, isAudio, isPDF, isImage, fileSizeMB, sourceFile, totalFiles) {
-    const truncatedName = sourceFile.length > CONFIG.SIZES.FILENAME_TRUNCATE_LENGTH 
-        ? sourceFile.substring(0, CONFIG.SIZES.FILENAME_TRUNCATE_LENGTH) + '...' 
-        : sourceFile;
-    
-    const badgeClass = isAudio ? 'audio' : isPDF ? 'pdf' : isImage ? 'image' : '';
-    
-    return `
-        <div class="file-card">
-            ${previewHTML}
-            <div class="file-info">
-                <div class="file-header">
-                    <span class="file-number">#${index + 1}</span>
-                    <span class="file-type-badge ${badgeClass}">${extension}</span>
-                </div>
-                <div class="file-meta">
-                    <span class="file-size">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="inline-svg">
-                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-                        </svg>
-                        ${fileSizeMB} MB
-                    </span>
-                    ${totalFiles > 1 ? `<span class="source-file" title="${sourceFile}">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="inline-svg">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                            <polyline points="14 2 14 8 20 8"/>
-                        </svg>
-                        ${truncatedName}
-                    </span>` : ''}
-                </div>
-                <div class="file-actions">
-                    <button class="btn btn-primary" onclick="downloadFile('file_${index}')">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                            <polyline points="7 10 12 15 17 10"/>
-                            <line x1="12" y1="15" x2="12" y2="3"/>
-                        </svg>
-                        Download
-                    </button>
-                    <button class="btn btn-secondary" onclick="viewFile('file_${index}')">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                            <circle cx="12" cy="12" r="3"/>
-                        </svg>
-                        View
-                    </button>
-                </div>
-            </div>
-        </div>
-    `;
-}
-
-function createResultsHTML(filesHTML, attachmentCount, documentCount) {
-    return `
-        <div class="results-header">
-            <div>
-                <h2 class="results-title">Extracted Files</h2>
-                <span class="results-count">${attachmentCount} files from ${documentCount} document${documentCount > 1 ? 's' : ''}</span>
-            </div>
-            <button class="btn btn-primary" onclick="downloadAll()">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                    <polyline points="7 10 12 15 17 10"/>
-                    <line x1="12" y1="15" x2="12" y2="3"/>
-                </svg>
-                Download All
-            </button>
-        </div>
-        <div class="files-grid">
-            ${filesHTML.join('')}
-        </div>
-    `;
-}
-
-// ============================================
-// FILE TYPE DETECTION
-// ============================================
-
-async function guessExtension(blob) {
-    const header = await blob.slice(0, CONFIG.SIZES.SIGNATURE_HEADER_SIZE).arrayBuffer();
-    const bytes = new Uint8Array(header);
-
-    // Special check for PDF at offset 4
-    if(bytes[4] === 0x25 && bytes[5] === 0x50 && bytes[6] === 0x44) return 'pdf';
-
-    for (const [ext, sig] of Object.entries(CONFIG.FILE_SIGNATURES)) {
-        if (sig.every((byte, i) => bytes[i] === byte)) {
-            return ext;
-        }
-    }
-    return 'bin';
-}
-
-function getMimeType(extension) {
-    return CONFIG.MIME_TYPES[extension] || CONFIG.MIME_TYPES.default;
-}
-
-// ============================================
-// FILE DOWNLOAD FUNCTIONS
-// ============================================
-
-// Download file function
-async function downloadFile(fileId) {
-    const fileData = window.fileData[fileId];
-    if (!fileData) {
-        console.error('File data not found');
-        return;
-    }
-    
-    // Create meaningful filename
-    const baseName = fileData.sourceFileName || 'file';
-    const cleanBaseName = baseName.replace(/[\/\\:*?"<>|\x00-\x1F]/g, '_').trim(); // Remove invalid filename characters, preserve Unicode
-    const filename = `${cleanBaseName}_${fileData.index + 1}.${fileData.extension}`;
-    
-    // Check if File System Access API is supported
-    if ('showSaveFilePicker' in window) {
-        try {
-            // Let user choose where to save the file
-            const handle = await window.showSaveFilePicker({
-                suggestedName: filename,
-                types: [{
-                    description: fileData.extension.toUpperCase() + ' File',
-                    accept: {
-                        [`${fileData.mimeType}`]: [`.${fileData.extension}`]
-                    }
-                }]
-            });
-            
-            // Fetch the blob data
-            const response = await fetch(fileData.url);
-            const blob = await response.blob();
-            
-            // Write to the selected file
-            const writable = await handle.createWritable();
-            await writable.write(blob);
-            await writable.close();
-            
-            console.log('File saved successfully');
-        } catch (err) {
-            // User cancelled or error occurred
-            if (err.name !== 'AbortError') {
-                console.error('Error saving file:', err);
-                // Fallback to traditional download
-                fallbackDownload(fileData.url, filename);
-            }
-        }
-    } else {
-        // Fallback for browsers that don't support File System Access API
-        fallbackDownload(fileData.url, filename);
-    }
-}
-
-// Fallback download method
-function fallbackDownload(url, filename) {
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-}
-
-// View file in new tab
-function viewFile(fileId) {
-    const fileData = window.fileData[fileId];
-    if (!fileData) {
-        console.error('File data not found');
-        return;
-    }
-    
-    window.open(fileData.url, '_blank');
-}
-
-// ============================================
-// IMAGE MODAL FUNCTIONS
-// ============================================
-
-// Open image in modal
-function openImageModal(fileId) {
-    const fileData = window.fileData[fileId];
-    if (!fileData) {
-        console.error('File data not found');
-        return;
-    }
-    
-    // Create modal
-    const modal = document.createElement('div');
-    modal.className = 'image-modal';
-    modal.innerHTML = `
-        <div class="modal-overlay" onclick="closeImageModal()"></div>
-        <div class="modal-content">
-            <button class="modal-close" onclick="closeImageModal()">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="18" y1="6" x2="6" y2="18"></line>
-                    <line x1="6" y1="6" x2="18" y2="18"></line>
-                </svg>
-            </button>
-            <img src="${fileData.url}" alt="Full size image">
-            <div class="modal-actions">
-                <button class="btn btn-primary" onclick="downloadFile('${fileId}')">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                        <polyline points="7 10 12 15 17 10"/>
-                        <line x1="12" y1="15" x2="12" y2="3"/>
-                    </svg>
-                    Download
-                </button>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(modal);
-    
-    // Prevent body scroll
-    document.body.style.overflow = 'hidden';
-}
-
-// Close image modal
-function closeImageModal() {
-    const modal = document.querySelector('.image-modal');
-    if (modal) {
-        modal.remove();
-        document.body.style.overflow = '';
-    }
-}
-
-// ============================================
-// BATCH DOWNLOAD FUNCTIONS
-// ============================================
-
-// Download all files
-async function downloadAll() {
-    if (!window.fileData) {
-        console.error('No files to download');
-        return;
-    }
-    
-    const files = Object.entries(window.fileData);
-    
-    // Check if File System Access API is supported for directory selection
-    if ('showDirectoryPicker' in window) {
-        try {
-            // Let user choose a directory
-            const directoryHandle = await window.showDirectoryPicker();
-            
-            // Download all files to the selected directory
-            for (const [fileId, fileData] of files) {
-                const baseName = fileData.sourceFileName || 'file';
-                const cleanBaseName = baseName.replace(/[^a-z0-9_\-]/gi, '_');
-                const filename = `${cleanBaseName}_${fileData.index + 1}.${fileData.extension}`;
-                
-                try {
-                    const fileHandle = await directoryHandle.getFileHandle(filename, { create: true });
-                    const writable = await fileHandle.createWritable();
-                    
-                    const response = await fetch(fileData.url);
-                    const blob = await response.blob();
-                    
-                    await writable.write(blob);
-                    await writable.close();
-                } catch (err) {
-                    console.error(`Error saving ${filename}:`, err);
-                }
-            }
-            
-            console.log('All files saved successfully');
-        } catch (err) {
-            if (err.name !== 'AbortError') {
-                console.error('Error saving files:', err);
-                // Fallback to sequential downloads
-                downloadAllFallback(files);
-            }
-        }
-    } else {
-        // Fallback for browsers that don't support Directory Picker
-        downloadAllFallback(files);
-    }
-}
-
-// Fallback download all method
-function downloadAllFallback(files) {
-    let downloadIndex = 0;
-    
-    // Download files with a delay to avoid browser blocking
-    const downloadNext = () => {
-        if (downloadIndex >= files.length) return;
-        
-        const [fileId, fileData] = files[downloadIndex];
-        
-        downloadFile(fileId);
-        
-        downloadIndex++;
-        if (downloadIndex < files.length) {
-            setTimeout(downloadNext, CONFIG.TIMING.DOWNLOAD_DELAY_MS);
-        }
-    };
-    
-    downloadNext();
-}
+drop.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
+});
+["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", (e) => addFiles([...e.dataTransfer.files]));
