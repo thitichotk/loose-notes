@@ -1,0 +1,8 @@
+/*
+  X-Frame-Options: DENY
+  Cross-Origin-Opener-Policy: same-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+
+# The pages.dev copy of the site stays out of search results; the custom domain is the real one.
+https://:project.pages.dev/*
+  X-Robots-Tag: noindex

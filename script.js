@@ -253,9 +253,6 @@ input.addEventListener("change", () => {
   input.value = ""; // so choosing the same file again still fires
 });
 
-drop.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
-});
 ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
 ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
 drop.addEventListener("drop", (e) => addFiles([...e.dataTransfer.files]));
