@@ -1,0 +1,20 @@
+# Loose-Notes
+
+> Loose-Notes pulls the audio recordings, PDFs and images out of GoodNotes `.goodnotes` files. It runs entirely in
+> the browser; nothing is uploaded.
+
+Drop in one notebook or several and you get back what's inside, grouped by notebook, ready to download one by one
+or as a zip. A `.goodnotes` file is a zip archive; the page reads it with JSZip and works out what each attachment
+is from its first bytes: M4A recordings, PDFs, and JPEG, PNG, HEIC, GIF or WebP images.
+
+## Using it
+
+1. In GoodNotes, open the notebook, tap Share, then Export as GoodNotes.
+2. Drop the `.goodnotes` file onto the page, or click to choose it. Several at once is fine.
+3. Click a file's name to preview it, use the download button on its row, or press Download all for one zip.
+
+## Links
+
+- [Loose-Notes](https://loosenotes.thitichotk.com/): the app
+- [Source on GitHub](https://github.com/thitichotk/loose-notes): GPL-3.0, a fork of alinuxpengui/goodnotes-extractor
+- [README](https://github.com/thitichotk/loose-notes/blob/main/README.md): how it works and its limits
